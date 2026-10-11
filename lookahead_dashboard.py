@@ -1,19 +1,23 @@
 """
-Construction Lookahead Dashboard v2 (2 / 3 / 4 / 6 week) with Progress Tracking
--------------------------------------------------------------------------------
+Construction Lookahead Dashboard v4 (2 / 3 / 4 / 6 week) - Sleek Gantt + Bird logo
+-----------------------------------------------------------------------
 - Upload the Bird "6wk Schedule" lookahead template (.xlsx / .xlsm)
-- Pick a 2, 3, 4 or 6-week window -> Gantt chart
+- Pick a 2, 3, 4 or 6-week window -> sleek Gantt chart
 - Enter % complete per activity -> shown directly on the Gantt bars
 - Download the lookahead in the SAME Excel format (progress written to
   STATUS / % COMPLETE only where entered; blanks are left as they were)
 
 Run:
     pip install streamlit pandas plotly openpyxl
-    streamlit run lookahead_dashboard_v2.py
+    streamlit run lookahead_dashboard_v4.py
+
+Logo:
+    Save Bird.png in the SAME folder as this script (or set LOGO_PATH below).
 """
 
 import io
 import re
+from pathlib import Path
 from datetime import date, datetime, timedelta
 
 import openpyxl
@@ -27,40 +31,62 @@ from openpyxl.utils import get_column_letter
 st.set_page_config(page_title="Lookahead Schedule Dashboard",
                    page_icon="🏗️", layout="wide")
 
-# Soft, eye-friendly palette (muted pastels for planned, deeper tone for done)
-PALETTE = [
-    ("#A8C5E2", "#3F6E9E"),  # soft blue
-    ("#B9DDC4", "#3E8E5E"),  # sage green
-    ("#F6D3A8", "#C9772B"),  # warm sand / orange
-    ("#D7C4E6", "#7A5A9E"),  # lavender
-    ("#F2C1C1", "#B85C5C"),  # dusty rose
-    ("#BFE3E0", "#3C8A84"),  # teal mist
-    ("#E8DFA8", "#9C8A2E"),  # soft olive
-    ("#CFD6DE", "#5B6878"),  # slate
-]
-ACCENT = "#E8833A"           # softened Bird orange
-TEXT = "#2B3440"
+FONT = "Segoe UI, Inter, Helvetica Neue, Arial, sans-serif"
+TEXT = "#1F2937"
+MUTED = "#9CA3AF"
+GRID = "#F1F3F6"
+ACCENT = "#E8833A"          # softened Bird orange
+TODAY = "#EF4444"
 
-# Excel colours for the export (same soft theme)
-XL_PLANNED = PatternFill("solid", fgColor="F6D3A8")   # planned, not yet done
-XL_DONE = PatternFill("solid", fgColor="8CC6A0")      # completed portion
+# (planned / light, completed / dark) per trade-section - modern muted tones
+PALETTE = [
+    ("#C7D7F5", "#4F7CDB"),  # indigo blue
+    ("#BFE0EE", "#2B8CB8"),  # sky blue
+    ("#FBDCC3", "#E8833A"),  # Bird orange
+    ("#E1D5F5", "#8B5CF6"),  # violet
+    ("#F8CFD6", "#E05A74"),  # rose
+    ("#C4ECEC", "#14A3A3"),  # teal
+    ("#F3E6B5", "#C99A12"),  # amber
+    ("#D9DEE6", "#5B6B82"),  # slate
+]
+
+# Bird scope is always dark green (planned = dark green, completed = deeper green)
+BIRD_COLORS = ("#2E7D4F", "#14532D")
+
+# Logo: Bird.png next to this script
+LOGO_PATH = Path(__file__).parent / "Bird.png"
+
+
+def is_bird_section(name):
+    return "bird" in str(name).lower()
+
+
+# Excel colours for the export
+XL_PLANNED = PatternFill("solid", fgColor="FBDCC3")
+XL_DONE = PatternFill("solid", fgColor="8FD3AE")
 NO_FILL = PatternFill(fill_type=None)
 
 st.markdown(f"""
 <style>
-.block-container {{padding-top: 1.4rem;}}
-h1 {{color:{TEXT};}}
-.kpi {{background:#FAFBFC;border:1px solid #E6E9EE;border-left:6px solid {ACCENT};
-      border-radius:10px;padding:12px 16px;margin-bottom:8px;}}
-.kpi .lbl {{font-size:0.75rem;color:#6B7684;text-transform:uppercase;letter-spacing:.05em;}}
-.kpi .val {{font-size:1.2rem;font-weight:700;color:{TEXT};}}
-.legend-chip {{display:inline-block;width:14px;height:14px;border-radius:3px;
-      vertical-align:middle;margin:0 6px 0 14px;}}
+html, body, [class*="css"] {{font-family:{FONT};}}
+.block-container {{padding-top:1.3rem;}}
+h1 {{color:{TEXT};font-weight:700;letter-spacing:-.01em;}}
+.kpi {{background:#FFFFFF;border:1px solid #ECEFF3;border-radius:14px;
+      padding:14px 18px;margin-bottom:8px;box-shadow:0 1px 3px rgba(16,24,40,.05);}}
+.kpi .lbl {{font-size:.72rem;color:#6B7280;text-transform:uppercase;letter-spacing:.07em;}}
+.kpi .val {{font-size:1.15rem;font-weight:700;color:{TEXT};margin-top:2px;}}
+.kpi .bar {{height:3px;width:36px;background:{ACCENT};border-radius:3px;margin-bottom:8px;}}
+[data-testid="stPlotlyChart"] {{background:#FFFFFF;border:1px solid #ECEFF3;
+      border-radius:16px;padding:8px 6px;box-shadow:0 2px 10px rgba(16,24,40,.06);}}
+.legend {{font-size:.85rem;color:#4B5563;margin-top:6px;}}
+.chip {{display:inline-block;width:22px;height:8px;border-radius:8px;
+      vertical-align:middle;margin:0 6px 0 16px;}}
 </style>
 """, unsafe_allow_html=True)
 
 WEEK_OPTIONS = {"2-Week Lookahead": 2, "3-Week Lookahead": 3,
                 "4-Week Lookahead": 4, "6-Week Lookahead": 6}
+DAY_MS = 86400000
 
 
 # ============================================================== helpers
@@ -104,7 +130,6 @@ def is_marked(v):
 
 
 def parse_pct(v):
-    """Read an existing STATUS / % COMPLETE value -> 0-100, or None."""
     if v is None or v == "":
         return None
     if isinstance(v, (int, float)):
@@ -143,21 +168,25 @@ def parse_workbook(file_bytes: bytes):
         raise ValueError("The 'FROM:' date is missing or not a valid date.")
 
     rows, section = [], "General"
+    # section headers are the bold rows in the template; fall back to "no x marks"
+    use_bold = any(ws.cell(r, desc_col).font.b and ws.cell(r, desc_col).value
+                   for r in range(hdr_row + 2, ws.max_row + 1))
     for r in range(hdr_row + 2, ws.max_row + 1):
         desc = ws.cell(r, desc_col).value
         if desc is None or str(desc).strip() in ("", "0"):
             continue
         desc = str(desc).strip()
         offsets = [i for i, c in enumerate(info["day_cols"]) if is_marked(ws.cell(r, c).value)]
-        if not offsets:
-            section = desc            # trade / area header row
+        bold = bool(ws.cell(r, desc_col).font and ws.cell(r, desc_col).font.b)
+        if bold or (not use_bold and not offsets):
+            section = desc            # trade / area header row (bold in template)
             continue
-        status = ws.cell(r, status_col).value
+        if not offsets:               # activity with nothing scheduled -> not shown
+            continue
         rows.append({
             "row": r, "Section": section, "Activity": desc,
             "Sched ID": ws.cell(r, info["id_col"]).value or "",
-            "offsets": offsets, "status_raw": status,
-            "progress": parse_pct(status),
+            "offsets": offsets, "progress": parse_pct(ws.cell(r, status_col).value),
             "Manpower": ws.cell(r, info["man_col"]).value or "",
             "Notes": ws.cell(r, info["notes_col"]).value or "",
         })
@@ -168,8 +197,7 @@ def done_offsets(offsets, pct):
     """First N planned days (chronological) count as complete."""
     if pct is None or pct <= 0:
         return set()
-    n = round(len(offsets) * min(pct, 100) / 100)
-    return set(offsets[:n])
+    return set(offsets[:round(len(offsets) * min(pct, 100) / 100)])
 
 
 def segments(offs):
@@ -178,94 +206,159 @@ def segments(offs):
         if o == cur[-1] + 1:
             cur.append(o)
         else:
-            segs.append(cur); cur = [o]
+            segs.append(cur)
+            cur = [o]
     segs.append(cur)
     return segs
 
 
-def build_gantt(info, rows, progress, n_days, n_weeks):
-    start = info["from"]
-    sections = list(dict.fromkeys(a["Section"] for a in rows))
-    colors = {s: PALETTE[i % len(PALETTE)] for i, s in enumerate(sections)}
-    fig = go.Figure()
-    y_labels, shown_legend = [], set()
-    DAY = 86400000
+def short(text, n=42):
+    return text if len(text) <= n else text[: n - 1] + "…"
 
-    for a in rows:
-        offs = [o for o in a["offsets"] if o < n_days]
-        if not offs:
+
+# ============================================================== sleek gantt
+def build_gantt(info, rows, progress, n_days, n_weeks, show_labels=True, compact=False):
+    start = info["from"]
+    win_end = start + timedelta(days=n_days)
+    sections = list(dict.fromkeys(a["Section"] for a in rows))
+    colors, i = {}, 0
+    for s in sections:
+        if is_bird_section(s):
+            colors[s] = BIRD_COLORS
+        else:
+            colors[s] = PALETTE[i % len(PALETTE)]
+            i += 1
+
+    # y categories: section header rows + activity rows (unique keys)
+    cats, ticktext, sec_rows = [], [], []
+    visible = [a for a in rows if any(o < n_days for o in a["offsets"])]
+    if not visible:
+        return None
+    for s in sections:
+        acts = [a for a in visible if a["Section"] == s]
+        if not acts:
             continue
-        label = a["Activity"]
-        y_labels.append(label)
+        key = f"§{s}"
+        cats.append(key)
+        sec_rows.append((key, s))
+        ticktext.append(f"<span style='color:{colors[s][1]}'><b>{s.upper()}</b></span>")
+        for a in acts:
+            a_key = f"r{a['row']}"
+            cats.append(a_key)
+            ticktext.append(f"<span style='color:{TEXT}'>{short(a['Activity'])}</span>")
+
+    fig = go.Figure()
+    bar_w = 0.5 if compact else 0.62
+    shown = set()
+
+    for a in visible:
+        key = f"r{a['row']}"
+        light, dark = colors[a["Section"]]
+        offs = [o for o in a["offsets"] if o < n_days]
         pct = progress.get(a["row"])
         done = done_offsets(a["offsets"], pct)
-        light, dark = colors[a["Section"]]
-        pct_txt = f"{pct:.0f}%" if pct is not None else "No progress entered"
-
+        pct_txt = f"{pct:.0f}%" if pct is not None else "—"
         for seg in segments(offs):
-            s_date = start + timedelta(days=seg[0])
-            hover = (f"<b>{label}</b><br>{a['Section']}<br>"
-                     f"{s_date:%a %b %d} → {start + timedelta(days=seg[-1]):%a %b %d}"
-                     f"<br>Days: {len(seg)}<br>Progress: {pct_txt}"
-                     + (f"<br>Manpower: {a['Manpower']}" if a["Manpower"] else ""))
-            # planned (light) bar
+            s0 = start + timedelta(days=seg[0])
+            s1 = start + timedelta(days=seg[-1])
+            hover = (f"<b>{a['Activity']}</b><br>"
+                     f"<span style='color:{MUTED}'>{a['Section']}</span><br><br>"
+                     f"📅 {s0:%a %b %d} → {s1:%a %b %d}  ·  {len(seg)} d<br>"
+                     f"✅ Progress: <b>{pct_txt}</b>"
+                     + (f"<br>👷 Manpower: {a['Manpower']}" if a["Manpower"] else ""))
             fig.add_trace(go.Bar(
-                y=[label], x=[len(seg) * DAY], base=[s_date], orientation="h",
-                marker=dict(color=light, line=dict(color=dark, width=1)),
+                y=[key], x=[len(seg) * DAY_MS - DAY_MS * 0.08], base=[s0],
+                orientation="h", width=bar_w,
+                marker=dict(color=light, cornerradius=6, line=dict(width=0)),
                 name=a["Section"], legendgroup=a["Section"],
-                showlegend=a["Section"] not in shown_legend,
-                hovertemplate=hover + "<extra></extra>", width=0.6))
-            shown_legend.add(a["Section"])
-            # completed (dark) overlay, per contiguous done block
+                showlegend=a["Section"] not in shown,
+                hovertemplate=hover + "<extra></extra>"))
+            shown.add(a["Section"])
             d = [o for o in seg if o in done]
-            if d:
-                for dseg in segments(d):
-                    fig.add_trace(go.Bar(
-                        y=[label], x=[len(dseg) * DAY],
-                        base=[start + timedelta(days=dseg[0])], orientation="h",
-                        marker=dict(color=dark), width=0.6, showlegend=False,
-                        legendgroup=a["Section"],
-                        hovertemplate=hover + "<extra></extra>"))
-        # % label right of the last bar
-        if pct is not None:
-            fig.add_annotation(x=start + timedelta(days=offs[-1] + 1), y=label,
-                               text=f"<b>{pct:.0f}%</b>", showarrow=False,
-                               xanchor="left", xshift=6,
-                               font=dict(size=12, color="#2E7D4F" if pct >= 100 else TEXT))
+            for dseg in (segments(d) if d else []):
+                fig.add_trace(go.Bar(
+                    y=[key], x=[len(dseg) * DAY_MS - DAY_MS * 0.08],
+                    base=[start + timedelta(days=dseg[0])],
+                    orientation="h", width=bar_w,
+                    marker=dict(color=dark, cornerradius=6, line=dict(width=0)),
+                    legendgroup=a["Section"], showlegend=False,
+                    hovertemplate=hover + "<extra></extra>"))
+        if show_labels and pct is not None:
+            complete = pct >= 100
+            fig.add_annotation(
+                x=start + timedelta(days=offs[-1] + 1), y=key, xanchor="left", xshift=6,
+                text=f"<b>{'✓ ' if complete else ''}{pct:.0f}%</b>", showarrow=False,
+                font=dict(size=11, color="#FFFFFF"),
+                bgcolor="#22A06B" if complete else dark, borderpad=3, opacity=0.95)
 
-    if not y_labels:
-        return None
-    win_end = start + timedelta(days=n_days)
+    # week bands (alternating) + week labels on top
+    for w in range(n_weeks):
+        w0 = start + timedelta(days=7 * w)
+        w1 = min(w0 + timedelta(days=7), win_end)
+        if w0 >= win_end:
+            break
+        if w % 2 == 1:
+            fig.add_vrect(x0=w0, x1=w1, fillcolor="#F8FAFC", opacity=1,
+                          line_width=0, layer="below")
+        label = "THIS WEEK" if w == 0 else ("NEXT WEEK" if w == 1 else f"WEEK {w + 1}")
+        fig.add_annotation(x=w0 + (w1 - w0) / 2, y=1.0, yref="paper", yanchor="bottom",
+                           yshift=34, showarrow=False,
+                           text=f"<b>{label}</b>  <span style='color:{MUTED}'>{w0:%b %d}</span>",
+                           font=dict(size=11, color="#4B5563"))
+        if w > 0:
+            fig.add_vline(x=w0, line_width=1, line_color="#E5E7EB", layer="below")
+
+    # weekends - very subtle hatch-free tint
     for i in range(n_days):
         d = start + timedelta(days=i)
         if d.weekday() >= 5:
-            fig.add_vrect(x0=d, x1=d + timedelta(days=1), fillcolor="#EEF0F3",
-                          opacity=0.7, line_width=0, layer="below")
-    for w in range(1, n_weeks):
-        fig.add_vline(x=start + timedelta(days=7 * w), line_dash="dot",
-                      line_color=ACCENT, opacity=0.6)
+            fig.add_vrect(x0=d, x1=d + timedelta(days=1), fillcolor="#EEF1F5",
+                          opacity=0.6, line_width=0, layer="below")
+
+    # section separator lines
+    for key, _ in sec_rows[1:]:
+        fig.add_shape(type="line", xref="paper", x0=0, x1=1, y0=key, y1=key,
+                      yref="y", line=dict(color="#E5E7EB", width=1), layer="below")
+
+    # today marker
     today = date.today()
     if start <= today < win_end:
-        fig.add_vline(x=today, line_color="#D9534F", line_width=2)
+        t = datetime.combine(today, datetime.min.time()) + timedelta(hours=12)
+        fig.add_vline(x=t, line_color=TODAY, line_width=1.5, line_dash="dot")
+        fig.add_annotation(x=t, y=0, yref="paper", yanchor="top", yshift=-4,
+                           text="<b>TODAY</b>", showarrow=False,
+                           font=dict(size=10, color="#FFFFFF"), bgcolor=TODAY, borderpad=3)
 
-    order = list(dict.fromkeys(y_labels))
+    # invisible anchor so every row (incl. section headers) is kept on the axis
+    fig.add_trace(go.Scatter(x=[start] * len(cats), y=cats, mode="markers",
+                             marker=dict(opacity=0), hoverinfo="skip", showlegend=False))
+
+    row_h = 30 if compact else 38
     fig.update_layout(
-        barmode="overlay", height=max(380, 44 * len(order) + 150),
-        plot_bgcolor="white", paper_bgcolor="white",
-        font=dict(color=TEXT, size=13),
-        margin=dict(l=10, r=40, t=60, b=10),
-        legend=dict(orientation="h", y=-0.06, title=""),
-        hoverlabel=dict(bgcolor="white", font_size=12))
-    fig.update_yaxes(categoryorder="array", categoryarray=order[::-1], title="",
-                     gridcolor="#F1F3F6")
-    fig.update_xaxes(type="date", range=[start, win_end + timedelta(days=1)],
-                     dtick=DAY, tickformat="%a<br>%b %d", side="top",
-                     showgrid=True, gridcolor="#E6E9EE")
-    return fig
+        barmode="overlay", bargap=0.35,
+        height=max(380, row_h * len(cats) + 170),
+        plot_bgcolor="#FFFFFF", paper_bgcolor="#FFFFFF",
+        font=dict(family=FONT, color=TEXT, size=12),
+        margin=dict(l=10, r=60, t=80, b=40),
+        showlegend=False,
+        hoverlabel=dict(bgcolor="#FFFFFF", bordercolor="#E5E7EB",
+                        font=dict(family=FONT, size=12, color=TEXT)),
+    )
+    fig.update_yaxes(type="category", categoryorder="array", categoryarray=cats[::-1],
+                     range=[-0.6, len(cats) - 0.4],
+                     tickvals=cats, ticktext=ticktext, title="",
+                     showgrid=False, zeroline=False, ticks="outside", ticklen=8, tickcolor="#FFFFFF", automargin=True)
+    fig.update_xaxes(type="date", range=[start, win_end], side="top",
+                     dtick=DAY_MS, tickformat="%a<br><b>%d</b>",
+                     tickfont=dict(size=10, color="#6B7280"),
+                     tick0=datetime.combine(start, datetime.min.time()) + timedelta(hours=12),
+                     showgrid=False, gridcolor=GRID,
+                     zeroline=False, showline=False, ticks="")
+    return fig, colors
 
 
+# ============================================================== excel export
 def export_excel(file_bytes, info, rows, progress, n_weeks, is_xlsm):
-    """Same template, trimmed to the window, progress written where entered."""
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes), keep_vba=is_xlsm)
     ws = wb[info["sheet"]]
     n_days = min(n_weeks * 7, len(info["day_cols"]))
@@ -279,8 +372,7 @@ def export_excel(file_bytes, info, rows, progress, n_weeks, is_xlsm):
 
     for i, col in enumerate(info["day_cols"]):
         d = start + timedelta(days=i)
-        in_win = i < n_days
-        ws.column_dimensions[get_column_letter(col)].hidden = not in_win
+        ws.column_dimensions[get_column_letter(col)].hidden = i >= n_days
         ws.cell(hdr_row, col).value = "MTWTFSS"[d.weekday()]
         ws.cell(hdr_row + 1, col).value = d.day
         ws.cell(hdr_row + 1, col).number_format = "0"
@@ -297,13 +389,12 @@ def export_excel(file_bytes, info, rows, progress, n_weeks, is_xlsm):
             if i in a["offsets"]:
                 cell.fill = XL_DONE if i in done else XL_PLANNED
                 cell.alignment = Alignment(horizontal="center")
-        # write progress only if the user entered one; otherwise leave as-is
-        if pct is not None:
+        if pct is not None:                       # blank = leave as-is
             sc = ws.cell(a["row"], info["status_col"])
             sc.value = pct / 100
             sc.number_format = "0%"
             sc.alignment = Alignment(horizontal="center")
-            sc.font = Font(bold=True, color="2E7D4F" if pct >= 100 else "2B3440")
+            sc.font = Font(bold=True, color="22A06B" if pct >= 100 else "1F2937")
 
     out = io.BytesIO()
     wb.save(out)
@@ -311,23 +402,30 @@ def export_excel(file_bytes, info, rows, progress, n_weeks, is_xlsm):
 
 
 def kpi(col, label, value):
-    col.markdown(f'<div class="kpi"><div class="lbl">{label}</div>'
+    col.markdown(f'<div class="kpi"><div class="bar"></div><div class="lbl">{label}</div>'
                  f'<div class="val">{value}</div></div>', unsafe_allow_html=True)
 
 
 # ============================================================== sidebar
 with st.sidebar:
+    if LOGO_PATH.exists():
+        st.image(str(LOGO_PATH), use_container_width=True)
+    else:
+        st.caption("⚠️ Bird.png not found. Place it in the same folder as this script.")
+    st.divider()
     st.header("📂 1. Upload")
     up = st.file_uploader("Lookahead Excel (6wk Schedule template)", type=["xlsx", "xlsm"])
     st.header("📅 2. Lookahead window")
     choice = st.radio("Show", list(WEEK_OPTIONS), index=3, label_visibility="collapsed")
     n_weeks = WEEK_OPTIONS[choice]
-    st.header("✅ 3. Progress")
+    st.header("🎨 3. Chart display")
+    show_labels = st.toggle("Show % labels on bars", value=True)
+    compact = st.toggle("Compact rows", value=False)
+    st.header("✅ 4. Progress")
     st.caption("Enter % complete in the **Update Progress** tab. "
                "Leave blank if there is no update; blanks are not written to Excel.")
     if st.button("↺ Reset progress to file values", use_container_width=True):
-        st.session_state.pop("progress_editor", None)
-        st.session_state.pop("progress_df", None)
+        st.session_state.pop("file_key", None)
         st.rerun()
 
 # ============================================================== main
@@ -351,15 +449,13 @@ except Exception as e:
     st.error(f"Could not read the file: {e}")
     st.stop()
 
-# Progress table kept in session (reset when a new file is uploaded)
 file_key = f"{up.name}-{len(file_bytes)}"
 if st.session_state.get("file_key") != file_key:
     st.session_state["file_key"] = file_key
     st.session_state.pop("progress_editor", None)
     st.session_state["progress_df"] = pd.DataFrame([{
         "row": a["row"], "Section": a["Section"], "Activity": a["Activity"],
-        "Planned Days": len(a["offsets"]),
-        "% Complete": a["progress"],
+        "Planned Days": len(a["offsets"]), "% Complete": a["progress"],
     } for a in rows])
 
 n_days = min(n_weeks * 7, len(info["day_cols"]))
@@ -375,27 +471,22 @@ kpi(c4, "Lookahead To", f"{win_end:%a, %b %d, %Y}")
 
 tab_g, tab_p, tab_l = st.tabs(["📊 Gantt Chart", "✏️ Update Progress", "📋 Activity List"])
 
-# ---- progress editor (rendered first so the chart uses the latest values)
 with tab_p:
     st.markdown("Type the **% complete** (0–100) for each activity. "
                 "Leave a cell **blank** if there is no progress to report.")
     edited = st.data_editor(
-        st.session_state["progress_df"],
-        key="progress_editor", hide_index=True, use_container_width=True,
+        st.session_state["progress_df"], key="progress_editor",
+        hide_index=True, use_container_width=True,
         disabled=["Section", "Activity", "Planned Days"],
         column_order=["Section", "Activity", "Planned Days", "% Complete"],
-        column_config={
-            "% Complete": st.column_config.NumberColumn(
-                "% Complete", min_value=0, max_value=100, step=5, format="%d %%",
-                help="Leave blank if no progress"),
-        })
-    st.caption("Tip: the darker part of each Gantt bar shows the completed days. "
-               "Progress is applied to the earliest planned days first.")
+        column_config={"% Complete": st.column_config.NumberColumn(
+            "% Complete", min_value=0, max_value=100, step=5, format="%d %%",
+            help="Leave blank if no progress")})
+    st.caption("Progress is applied to the earliest planned days first.")
 
 progress = {int(r["row"]): (None if pd.isna(r["% Complete"]) else float(r["% Complete"]))
             for _, r in edited.iterrows()}
 
-# ---- KPIs
 in_win = [a for a in rows if any(o < n_days for o in a["offsets"])]
 entered = [progress[a["row"]] for a in in_win if progress.get(a["row"]) is not None]
 m1, m2, m3, m4 = st.columns(4)
@@ -405,30 +496,36 @@ m3.metric("Completed (100%)", sum(1 for p in entered if p >= 100))
 m4.metric("Avg. progress (entered)", f"{sum(entered)/len(entered):.0f}%" if entered else "—")
 
 with tab_g:
-    fig = build_gantt(info, rows, progress, n_days, n_weeks)
-    if fig is None:
+    result = build_gantt(info, rows, progress, n_days, n_weeks, show_labels, compact)
+    if result is None:
         st.warning("No activities are planned within this lookahead window.")
     else:
-        st.plotly_chart(fig, use_container_width=True)
+        fig, colors = result
+        st.plotly_chart(fig, use_container_width=True,
+                        config={"displaylogo": False,
+                                "modeBarButtonsToRemove": ["lasso2d", "select2d"],
+                                "toImageButtonOptions": {"filename": f"{info['project']}_{n_weeks}wk_gantt",
+                                                         "scale": 2}})
+        chips = "".join(f'<span class="chip" style="background:{d}"></span>{s}'
+                        for s, (_, d) in colors.items()
+                        if any(a["Section"] == s for a in in_win))
         st.markdown(
-            f'<span class="legend-chip" style="background:#A8C5E2"></span>Planned'
-            f'<span class="legend-chip" style="background:#3F6E9E"></span>Completed'
-            f'<span class="legend-chip" style="background:#EEF0F3"></span>Weekend'
-            f'<span class="legend-chip" style="background:{ACCENT}"></span>Week break'
-            f'<span class="legend-chip" style="background:#D9534F"></span>Today',
+            f'<div class="legend">{chips}</div><div class="legend">'
+            f'<span class="chip" style="background:#C7D7F5"></span>Planned (light)'
+            f'<span class="chip" style="background:#4F7CDB"></span>Completed (dark)'
+            f'<span class="chip" style="background:#EEF1F5"></span>Weekend'
+            f'<span class="chip" style="background:{TODAY}"></span>Today</div>',
             unsafe_allow_html=True)
 
 with tab_l:
     table = []
     for a in in_win:
         offs = [o for o in a["offsets"] if o < n_days]
-        p = progress.get(a["row"])
         table.append({
             "Section": a["Section"], "Sched ID": a["Sched ID"], "Activity": a["Activity"],
             "Start": win_start + timedelta(days=offs[0]),
             "Finish": win_start + timedelta(days=offs[-1]),
-            "Duration (days)": len(offs),
-            "% Complete": p,
+            "Duration (days)": len(offs), "% Complete": progress.get(a["row"]),
             "Manpower": a["Manpower"], "Notes": a["Notes"],
         })
     tdf = pd.DataFrame(table)
@@ -440,8 +537,7 @@ with tab_l:
         "% Complete": st.column_config.ProgressColumn(
             "% Complete", min_value=0, max_value=100, format="%d%%"),
         "Start": st.column_config.DateColumn(format="ddd MMM DD"),
-        "Finish": st.column_config.DateColumn(format="ddd MMM DD"),
-    })
+        "Finish": st.column_config.DateColumn(format="ddd MMM DD")})
 
 # ============================================================== download
 st.divider()
@@ -454,6 +550,6 @@ st.download_button(
     mime=("application/vnd.ms-excel.sheet.macroEnabled.12" if is_xlsm else
           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
     type="primary", use_container_width=True)
-st.caption("Same template layout. Planned days are shaded sand, completed days green, "
+st.caption("Same template layout. Planned days are shaded peach, completed days green, "
            "% complete goes in STATUS / % COMPLETE only where you entered it, "
            "and days outside the window are hidden.")
