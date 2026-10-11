@@ -552,4 +552,4 @@ st.download_button(
     type="primary", use_container_width=True)
 st.caption("Same template layout. Planned days are shaded peach, completed days green, "
            "% complete goes in STATUS / % COMPLETE only where you entered it, "
-           "and days outside the window are hidden.")
+           "and days outside the window are hidden. -CessDR")
